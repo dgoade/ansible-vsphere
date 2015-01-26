@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # Copyright (c) 2014, ViaSat Inc.
-#
+# dcg!
 # All rights reserved.
 # Redistribution and use in source and binary forms,
 # with or without modification, are permitted provided
@@ -37,6 +37,10 @@ import atexit
 import urllib2
 import datetime
 import ast
+
+#import epdb
+import logging
+from pprint import pformat
 
 try:
     from pyVim.connect import SmartConnect, Disconnect
@@ -329,6 +333,7 @@ class Vsphere(object):
             out = '%s did not complete successfully: %s' %(task.info.task,
                 task.info.error.msg)
 
+    
         return failed, out
 
     def get_container_view(self, vimtype, name = None, recurse = True):
@@ -497,6 +502,7 @@ class Vsphere(object):
 
         return snap
 
+
     def create_snapshot(self, vm, name, description = '',
                         memory = False, quiesce = False):
         if name is None:
@@ -508,6 +514,7 @@ class Vsphere(object):
         task = vm.CreateSnapshot(name = name, description = description,
                                  memory = memory, quiesce = quiesce)
 
+        
         failed, out = self._wait_task(task)
         return failed, dict(changed = True, msg = out)
 
@@ -762,17 +769,359 @@ class Vsphere(object):
 
         return failed, dict(changed = True, msg = msg)
 
+class Vsphere_vm(Vsphere):
+
+    def ss_name_from_ss_prop_lookup(self, tree, ss_prop):
+
+        rval = None
+
+        if tree.snapshot == ss_prop:
+        #if tree['snapshot'] == ss_prop:
+            #rval = tree['name']
+            rval = tree.name
+        else:
+            for child in tree.childSnapshotList:
+            #for child in tree['childSnapshotList']:
+                rval = self.ss_name_from_ss_prop_lookup(child, ss_prop)
+                if rval:
+                    break
+
+        return rval
+
+    def ss_name_from_ss_prop(self, ss_list, ss_prop):
+
+        rval = None
+
+        try:
+            for root_snap in ss_list:
+                rval = self.ss_name_from_ss_prop_lookup(root_snap, ss_prop)
+                if rval:
+                    break
+        except IndexError:
+            rval = None
+
+        return rval
+
+    def count_snapshot_ancestors(self, tree, ss_name, ancestor_count):
+
+        rval = ancestor_count
+        found = False
+
+        if tree.snapshot == ss_name:
+        #if tree['snapshot'] == ss_name:
+            rval = ancestor_count
+            found = True
+        else:
+            for child in tree.childSnapshotList:
+            #for child in tree['childSnapshotList']:
+                found, rval = self.count_snapshot_ancestors(child, ss_name, rval)
+                if found:
+                    rval += 1
+                    break
+
+        return found, rval
+
+    def num_snapshot_ancestors(self, ss_list, ss_name):
+
+        try:
+            found = False
+            ancestor_count = 0
+            for root_snap in ss_list:
+                found, ancestor_count = self.count_snapshot_ancestors(root_snap, ss_name, 0)
+                if found:
+                    break
+        except IndexError:
+            ancestor_count = 0
+
+        return ancestor_count
+
+    def get_snapshot_ancestry(self, tree, ss_name, ancestry):
+
+        rval = None
+        found_descendant = False
+
+        try:
+            #cur_ss_prop = tree['snapshot']
+            cur_ss_prop = tree.snapshot
+            if cur_ss_prop == ss_name:
+                found_descendant = True
+                ancestry.append(cur_ss_prop)
+            else:
+                for child in tree.childSnapshotList:
+                #for child in tree['childSnapshotList']:
+                    ancestry.append(cur_ss_prop)
+                    found_descendant, rval = self.get_snapshot_ancestry(child,
+                                                                        ss_name,
+                                                                        ancestry)
+                    if found_descendant:
+                        log_msg = "found ancestry for {0}".format(ss_name)
+                        logging.debug(log_msg)
+                        break
+                    else:
+                        log_msg = ("{0} is not an ancestor of {1}"
+                        .format(cur_ss_prop, _ss_name))
+                        logging.debug(log_msg)
+                        ancestry.pop()
+
+        except Exception:
+            log_msg = "Exception tracing ancestry"
+            logging.exception(log_msg)
+            ancestor_count = 0
+
+        return found_descendant, ancestry
+
+    def snapshot_ancestor(self, ss_list, ss_name, gens_prior):
+
+        ancestor_name = None
+
+        try:
+            found = False
+            ancestor_count = self.num_snapshot_ancestors(ss_list, ss_name)
+
+            log_msg = "ancestor_count={0}".format(ancestor_count)
+            logging.debug(log_msg)
+
+            log_msg =  'Logging pformatted data of the ss_list'
+            logging.debug(log_msg)
+            logging.debug(pformat(ss_list))
+
+            if ancestor_count >= gens_prior:
+                ancestry = []
+                for root_snap in ss_list:
+                    found, ancestry = self.get_snapshot_ancestry(
+                        root_snap, ss_name, ancestry)
+                    if found:
+                        log_msg = ("Ancestor for {0} found in {1}"
+                        .format(ss_name, root_snap))
+                        logging.debug(log_msg)
+                        break
+                    else:
+                        log_msg = ("No ancestors for {0} found in {1}"
+                        .format(ss_name, root_snap))
+                        logging.debug(log_msg)
+                if found:
+                    gens = len(ancestry)
+                    ancestor_name = ancestry[gens - (gens_prior + 1)]
+                    log_msg = ("ancestor for {0} is {1}"
+                    .format(ss_name, ancestor_name))
+                    logging.debug(log_msg)
+                else:
+                    log_msg = ("No ancestor for {0} was found"
+                    "in the entire tree".format(ss_name))
+                    logging.error(log_msg)
+            else:
+                log_msg = ("Ancestry of {0} does not exceed max"
+                " for rolling of {1}".format(ancestor_count, gens_prior))
+                logging.error(log_msg)
+        except Exception:
+            log_msg = ("Exception trying to find ancestor for {0}"
+            .format(ss_name))
+            logging.exception(log_msg)
+            ancestor_count = 0
+
+        return ancestor_name
+
+    def create_snapshot(self, **kwargs):
+    #def create_snapshot(self, vm = vm, name = name, prefix, suffix, 
+    #                            remove_ancestors = False,
+    #                            max_ancestors = 3, 
+    #                            description = '',
+    #                            memory = False, quiesce = False):
+
+
+        failed = False
+        changed = False
+        msg = None
+
+        vm = None
+        rolling = False
+        name = None
+        prefix = None
+        suffix = None
+        remove_ancestors = False
+        max_ancestors = 3
+        description = ''
+        memory = False
+        quiesce = False
+        needs_removal = False
+
+        if 'vm' in kwargs and kwargs['vm']: 
+            vm = kwargs['vm']
+        else:
+            failed = True
+            msg = "vm object required"
+
+        if not failed:
+            if 'rolling' in kwargs:
+                rolling = kwargs['rolling']
+            if rolling:
+                if 'prefix' in kwargs and kwargs['prefix']:
+                    prefix = kwargs['prefix']
+                    if 'suffix' in kwargs and kwargs['suffix']:
+                        suffix = kwargs['suffix']
+                        name = '{0}{1}'.format(prefix, suffix) 
+                    else:
+                        failed = True
+                        msg  = "suffix required for rolling snapshot"
+                else:
+                    failed = True
+                    msg  = "prefix required for rolling snapshot"
+            else:
+                if 'name' in kwargs:
+                    name = kwargs['name']
+                else:
+                    failed = True
+                    msg = "name required for non-rolling snapshot"
+    
+        if not failed:
+            if 'remove_ancestors' in kwargs:
+                remove_ancestors = kwargs['remove_ancestors']
+
+            if 'max_ancestors' in kwargs and kwargs['max_ancestors'] > 0:
+                max_ancestors = kwargs['max_ancestors']
+                log_msg = ("Setting max_ancestors to {0}"
+                .format(max_ancestors))
+                logging.debug(log_msg)
+
+            if 'description' in kwargs and kwargs['description']:
+                description = kwargs['description']
+
+            if 'memory' in kwargs:
+                memory = kwargs['memory']
+
+            if 'quiesce' in kwargs:
+                quiesce = kwargs['quiesce']
+
+        if not failed:
+            failed, create_out = Vsphere.create_snapshot(self, vm, name, 
+                                                    description,
+                                                    memory = memory, 
+                                                    quiesce = quiesce)
+
+            if 'changed' in create_out:
+                changed = create_out['changed']
+
+            if 'msg' in create_out:
+                create_msg = create_out['msg']
+            else:
+                create_msg = "unknown"
+
+            if failed:
+                msg = ("failed to create snapshot: {0}"
+                "due to {1}".format(name, create_msg))
+            else:
+                msg = create_msg
+
+        if not failed: 
+            # go ahead and get the current snapshot info
+            # whether we need to roll or not so that we
+            # can send messages about it
+            if vm.snapshot.currentSnapshot:
+                cur_ss_prop = vm.snapshot.currentSnapshot 
+
+                log_msg = "cur_ss_prop={0}".format(vm.snapshot.currentSnapshot)
+                logging.debug(log_msg)
+
+                cur_ss_name = self.ss_name_from_ss_prop(
+                    vm.snapshot.rootSnapshotList,
+                    cur_ss_prop)
+
+                log_msg = "cur_ss_name={0}".format(cur_ss_name)
+                logging.debug(log_msg)
+
+                if cur_ss_name:
+                    msg = "new snapshot created {0}".format(cur_ss_name)
+                else:
+                    failed = True
+                    msg = ("unable to get current snapshot name"
+                           "from it's property name: {0}".format(cur_ss_prop))
+            else: 
+                failed = True 
+                msg = ("no current snapshot")
+
+        if not failed: 
+            if rolling:
+                if changed:
+                    if remove_ancestors:
+                        log_msg = ("rolling snapshot with remove_ancestors"
+                        "was specified so checking for need to roll")
+                        logging.debug(log_msg)
+                    else: 
+                        log_msg = ("rolling snapshot specified but"
+                        "remove_ancestors was not so not rolling")
+                        logging.debug(log_msg)
+                else:
+                    log_msg = "new snapshot not created so no need to roll"
+                    logging.debug(log_msg)
+                    remove_ancestors = False
+            else:
+                log_msg = ("non-rolling snapshot specified so ignoring any"
+                "remove_ancestors setting")
+                logging.debug(log_msg)
+                remove_ancestors = False
+
+            if remove_ancestors:
+                ancestor_ss_prop = self.snapshot_ancestor(
+                    vm.snapshot.rootSnapshotList,
+                    cur_ss_prop,
+                        max_ancestors)
+
+                log_msg = "ancestor_ss_prop={0}".format(ancestor_ss_prop)
+                logging.debug(log_msg)
+
+                if ancestor_ss_prop:
+                    ancestor_ss_name = self.ss_name_from_ss_prop(
+                        vm.snapshot.rootSnapshotList,
+                        ancestor_ss_prop)
+
+                    if ancestor_ss_name:
+                        # make sure the ancestor name matches the prefix
+                        remove_pattern = re.compile('^{0}.*'.format(prefix)) 
+                        ss_match = remove_pattern.match(ancestor_ss_name)
+                        needs_removal = ss_match
+                    else:
+                        failed = True
+                        msg = ("can't find the name for ancestor: "
+                        .format(ancestor_ss_prop))
+                
+            if needs_removal: 
+                # now, remove the ancestor 
+                failed, remove_out = Vsphere.remove_snapshot(self, 
+                    vm, ancestor_ss_name, False)
+
+                if failed:
+                    msg = ("{0}, failed to remove ancestor: {1}"
+                    .format(msg, ancestor_ss_name))
+
+                    if 'msg' in remove_out:
+                        msg = ("{0} due to {1}"
+                        .format(msg, remove_out['msg']))
+                    else:
+                        msg = ("{0} for unknown reason"
+                        .format(msg))
+                else: 
+                    msg = ("{0}, ancestor removed {1}"
+                    .format(msg, ancestor_ss_name))
+            else:
+                msg = "{0}, no ancestors removed".format(msg)
+
+
+        out = dict(changed = changed, msg = msg)
+        return failed, out
 
 def core(module):
+
+    #epdb.serve()
     guest = module.params.get('guest', None)
     snapshot = module.params.get('snapshot', None)
+    rolling_snapshot = module.params.get('rolling_snapshot', None)
     guest_operations_manager = module.params.get('guest_operations_manager', None)
     put_file = module.params.get('put_file', None)
     get_file = module.params.get('get_file', None)
     spec = module.params.get('spec', {})
     folder = module.params.get('folder', dict())
 
-    v = Vsphere(module)
+    v = Vsphere_vm(module)
 
     if folder is not None:
         folder_state = folder.get('state', None)
@@ -805,13 +1154,36 @@ def core(module):
         except KeyError:
             module.fail_json(msg='Need to specify an snapshot action to perform')
 
+        prefix = snapshot.get('prefix', None)
+        suffix = snapshot.get('suffix', None)
         name = snapshot.get('name', None)
         if snapshot_action == 'create':
+            rolling = snapshot.get('rolling', False)
             memory = snapshot.get('memory', False)
             quiesce = snapshot.get('quiesce', False)
             description = snapshot.get('description', '')
-            failed, res = v.create_snapshot(vm, name, description = description,
-                                            memory = memory, quiesce = quiesce)
+            remove_ancestors = snapshot.get('remove_ancestors', False)
+            max_ancestors = snapshot.get('max_ancestors', 0)
+            #epdb.serve()
+            failed, res = v.create_snapshot(vm = vm, 
+                                        rolling = rolling,
+                                        prefix = prefix, 
+                                        suffix = suffix, 
+                                        name = name,
+                                        remove_ancestors = remove_ancestors,
+                                        max_ancestors = max_ancestors,
+                                        description = description,
+                                        memory = memory, 
+                                        quiesce = quiesce)
+
+        #name = snapshot.get('name', None)
+        #if snapshot_action == 'create':
+        #    memory = snapshot.get('memory', False)
+        #    quiesce = snapshot.get('quiesce', False)
+        #    description = snapshot.get('description', '')
+        #    failed, res = v.create_snapshot(vm, name, description = description,
+        #                                    memory = memory, quiesce = quiesce)
+
         elif snapshot_action == 'remove':
             children = snapshot.get('children', False)
             failed, res = v.remove_snapshot(vm, name, children)
@@ -821,6 +1193,43 @@ def core(module):
             failed, res = v.revert_snapshot(vm, name, suppress_power)
         else:
             module.fail_json(msg = 'Currently do not support action "%s" for snapshot' % snapshot_action)
+
+        return failed, res
+
+    if rolling_snapshot:
+        if guest is None:
+            module.fail_json(msg='The guest option needs to be specified')
+
+        try:
+            rolling_snapshot_action = rolling_snapshot['action']
+        except KeyError:
+            module.fail_json(msg='Need to specify a rolling_snapshot action to perform')
+
+        prefix = rolling_snapshot.get('prefix', None)
+        suffix = rolling_snapshot.get('suffix', None)
+        name = rolling_snapshot.get('name', None)
+        if rolling_snapshot_action == 'create':
+            memory = rolling_snapshot.get('memory', False)
+            quiesce = rolling_snapshot.get('quiesce', False)
+            description = rolling_snapshot.get('description', '')
+            remove_ancestors = rolling_snapshot.get('remove_ancestors', False)
+            max_ancestors = rolling_snapshot.get('max_ancestors', 0)
+            failed, res = v.create_snapshot(vm, 
+                                            prefix, suffix,
+                                            remove_ancestors,
+                                            max_ancestors = max_ancestors,
+                                            description = description,
+                                            memory = memory, 
+                                            quiesce = quiesce)
+        elif rolling_snapshot_action == 'remove':
+            children = rolling_snapshot.get('children', False)
+            failed, res = v.remove_snapshot(vm, name, children)
+
+        elif rolling_snapshot_action == 'revert':
+            suppress_power = rolling_snapshot.get('suppress_power', False)
+            failed, res = v.revert_snapshot(vm, name, suppress_power)
+        else:
+            module.fail_json(msg = 'Currently do not support action "%s" for rolling_snapshot' % snapshot_action)
 
         return failed, res
 
@@ -871,6 +1280,9 @@ def core(module):
     return True, dict(msg = 'Unknown set of parameters were given.')
 
 def main():
+
+    logging.basicConfig(filename='logs/vsphere.log',level=logging.DEBUG)
+ 
     module = AnsibleModule(
         argument_spec = dict(
             host = dict(required=True),
@@ -879,6 +1291,7 @@ def main():
             guest = dict(type='dict'),
             folder = dict(type='dict'),
             snapshot = dict(type='dict'),
+            rolling_snapshot = dict(type='dict'),
             guest_operations_manager = dict(),
             put_file = dict(),
             get_file = dict(),

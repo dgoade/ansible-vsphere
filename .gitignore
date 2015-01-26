@@ -2,9 +2,6 @@
 __pycache__/
 *.py[cod]
 
-# C extensions
-*.so
-
 # Distribution / packaging
 .Python
 env/
@@ -12,6 +9,7 @@ bin/
 build/
 develop-eggs/
 dist/
+downloads/
 eggs/
 lib/
 lib64/
@@ -25,6 +23,12 @@ var/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
 
 # Unit test / coverage reports
 htmlcov/
@@ -52,3 +56,82 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 
+### Vagrant template
+.vagrant/
+
+
+### VirtualEnv template
+# Virtualenv
+# http://iamzed.com/2009/05/07/a-primer-on-virtualenv/
+.Python
+[Bb]in
+[Ii]nclude
+[Ll]ib
+[Ss]cripts
+pyvenv.cfg
+
+
+### JetBrains template
+# Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm
+
+*.iml
+
+## Directory-based project format:
+.idea/
+# if you remove the above rule, at least ignore the following:
+
+# User-specific stuff:
+# .idea/workspace.xml
+# .idea/tasks.xml
+# .idea/dictionaries
+
+# Sensitive or high-churn files:
+# .idea/dataSources.ids
+# .idea/dataSources.xml
+# .idea/sqlDataSources.xml
+# .idea/dynamic.xml
+# .idea/uiDesigner.xml
+
+### vim template
+[._]*.s[a-w][a-z]
+[._]s[a-w][a-z]
+*.un~
+Session.vim
+.netrwhist
+*~
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+*.pot
+
+# PyBuilder
+target/
+
+### Perl template
+/blib/
+/.build/
+_build/
+cover_db/
+inc/
+Build
+!Build/
+Build.bat
+.last_cover_stats
+/Makefile
+/Makefile.old
+/MANIFEST.bak
+/META.yml
+/META.json
+/MYMETA.*
+nytprof.out
+/pm_to_blib
+*.o
+*.bs
