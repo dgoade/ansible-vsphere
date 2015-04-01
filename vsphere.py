@@ -169,14 +169,14 @@ options:
               through the special syntax.
               C( { "ManagedObjectReference" : { "type": "MOR TYPE", "name" : "MOR NAME" } } )
 
-	      Sometimes managed objects are named the same across multiple parent objects.
-	      For instance you may have two clusters setup within a datacenter each with 
-	      a resource pool named Resources. In order to match the correct resource pool
-	      you can add a limit to the ManagedObjectReference definition so that the MOR 
-	      will be looked up relative to another Managed object. 
+          Sometimes managed objects are named the same across multiple parent objects.
+          For instance you may have two clusters setup within a datacenter each with 
+          a resource pool named Resources. In order to match the correct resource pool
+          you can add a limit to the ManagedObjectReference definition so that the MOR 
+          will be looked up relative to another Managed object. 
 
               See the Clone VM example for a fairly ful example including an example of a 
-	      managed object reference with a limit.
+          managed object reference with a limit.
         required: False
         default: null
 
@@ -363,7 +363,7 @@ class Vsphere(object):
         """
         Get vsphere object(s), if name is not None, return the first object found.
 
-	limit will change the root directory to search for the vsphere object from.
+    limit will change the root directory to search for the vsphere object from.
         """
         if isinstance(limit, dict):
             limit = self.get_container_view( [getattr(vim, limit['type'])], limit['name'] )
@@ -903,6 +903,50 @@ class Vsphere_vm(Vsphere):
 
         return ancestor_count
 
+    def snapshot_primogenitor(self, ancestry, root_snap, prefix):
+        """
+        Helper function to find the snapshot in the tree that
+        we need to rollback to.
+
+        'primogenitor' is a fancy word for the earliest, or
+        oldest known ancestor of a family tree. In this case,
+        we're defining primogenitor as the first snapshot in the
+        tree who's name property (not the key) contains the given
+        prefix. We first find that element, then we can find it's
+        immediate ancestor and that will be the snapshot that
+        we will rollback to.
+        """
+        rval = 0
+
+        #epdb.serve()
+        tree_len = len(ancestry)
+
+        prefix_pattern = re.compile('^{0}.*'.format(prefix))
+
+        for i in range(tree_len - 1, 0, -1):
+            log_msg = ("ancestor# {0}: {1}"
+            .format(i, ancestry[i]))
+            logging.debug(log_msg)
+
+            ss_name = self.ss_name_from_ss_prop(
+                root_snap,
+                ancestry[i])
+            # see if the ancestor name matches the prefix
+            ancestry_match = prefix_pattern.match(ss_name)
+
+            if ancestry_match:
+                log_msg = ("name for ancestor# {0}: {1} has prefix {2}"
+                .format(i, ss_name, prefix))
+                logging.debug(log_msg)
+                rval = i
+            else:
+                log_msg = ("name for ancestor# {0}: {1} does not have"
+                "prefix {2} ".format(i, ss_name, prefix))
+                logging.debug(log_msg)
+                break
+
+        return rval
+
     def get_snapshot_ancestry(self, tree, ss_name, ancestry):
 
         rval = None
@@ -938,9 +982,9 @@ class Vsphere_vm(Vsphere):
 
         return found_descendant, ancestry
 
-    def snapshot_ancestor(self, ss_list, ss_name, gens_prior):
+    def snapshot_ancestor(self, ss_list, ss_name, gens_prior, prefix):
 
-        ancestor_name = None
+        ancestor_prop = None
 
         try:
             found = False
@@ -952,6 +996,17 @@ class Vsphere_vm(Vsphere):
             log_msg =  'Logging pformatted data of the ss_list'
             logging.debug(log_msg)
             logging.debug(pformat(ss_list))
+
+            #epdb.serve()
+            if gens_prior:
+                log_msg = ("Using requested ancestor # {0}"
+                .format(gens_prior))
+                logging.debug(log_msg)
+            else:
+                log_msg = ("Using oldest known ancestor # {0}"
+                .format(ancestor_count))
+                logging.debug(log_msg)
+                gens_prior = ancestor_count
 
             if ancestor_count >= gens_prior:
                 ancestry = []
@@ -968,11 +1023,20 @@ class Vsphere_vm(Vsphere):
                         .format(ss_name, root_snap))
                         logging.debug(log_msg)
                 if found:
-                    gens = len(ancestry)
-                    ancestor_name = ancestry[gens - (gens_prior + 1)]
-                    log_msg = ("ancestor for {0} is {1}"
-                    .format(ss_name, ancestor_name))
-                    logging.debug(log_msg)
+                    if prefix:
+                        primo = self.snapshot_primogenitor(ancestry,
+                                                           ss_list,
+                                                           prefix)
+                        ancestor_prop = ancestry[primo-1]
+                        log_msg = ("primogenitor's ancestor of {0} is {1}"
+                                   .format(ss_name, ancestor_prop))
+                        logging.debug(log_msg)
+                    else:
+                        gens = len(ancestry)
+                        ancestor_prop = ancestry[gens - (gens_prior + 1)]
+                        log_msg = ("ancestor for {0} is {1}"
+                        .format(ss_name, ancestor_prop))
+                        logging.debug(log_msg)
                 else:
                     log_msg = ("No ancestor for {0} was found"
                     "in the entire tree".format(ss_name))
@@ -987,7 +1051,7 @@ class Vsphere_vm(Vsphere):
             logging.exception(log_msg)
             ancestor_count = 0
 
-        return ancestor_name
+        return ancestor_prop
 
     def rollback_snapshot(self, **kwargs):
 
@@ -998,6 +1062,7 @@ class Vsphere_vm(Vsphere):
         vm = None
         name = None
         ancestor = None
+        prefix = None
         suppress_power_on = False
 
         cur_ss_prop = None
@@ -1014,11 +1079,15 @@ class Vsphere_vm(Vsphere):
             msg = "vm object required"
 
         if not failed:
+            if 'prefix' in kwargs:
+                prefix = kwargs['prefix']
+
             if 'ancestor' in kwargs:
                 ancestor = kwargs['ancestor']
+
             else:
                 failed = True
-                msg  = "ancestor required for snapshot rollback"
+                msg = "Prefix required for rollback"
 
         if not failed:
             if 'suppress_power_on' in kwargs:
@@ -1054,7 +1123,8 @@ class Vsphere_vm(Vsphere):
             ancestor_ss_prop = self.snapshot_ancestor(
                 vm.snapshot.rootSnapshotList,
                 cur_ss_prop,
-                ancestor)
+                ancestor,
+                prefix)
 
             if ancestor_ss_prop:
                 log_msg = "ancestor_ss_prop={0}".format(ancestor_ss_prop)
@@ -1312,7 +1382,8 @@ class Vsphere_vm(Vsphere):
                 ancestor_ss_prop = self.snapshot_ancestor(
                     vm.snapshot.rootSnapshotList,
                     cur_ss_prop,
-                    max_ancestors)
+                    max_ancestors,
+                    None)
 
                 log_msg = "ancestor_ss_prop={0}".format(ancestor_ss_prop)
                 logging.debug(log_msg)
@@ -1431,11 +1502,13 @@ def core(module):
             failed, res = v.revert_snapshot(vm, name, suppress_power)
 
         elif snapshot_action == 'rollback':
-            ancestor = snapshot.get('ancestor', 1)
+            ancestor = snapshot.get('ancestor', None)
+            prefix = snapshot.get('prefix', None)
             suppress_power = snapshot.get('suppress_power', False)
             failed, res = v.rollback_snapshot(vm = vm,
                                               name = name,
                                               ancestor = ancestor,
+                                              prefix = prefix,
                                               suppress_power = suppress_power)
         else:
             module.fail_json(msg = 'Currently do not support action "%s" for snapshot' % snapshot_action)
