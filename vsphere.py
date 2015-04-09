@@ -42,6 +42,9 @@ import epdb
 import logging
 from pprint import pformat
 
+import requests
+requests.packages.urllib3.disable_warnings()
+
 try:
     from pyVim.connect import SmartConnect, Disconnect
     from pyVmomi import vim, vmodl
